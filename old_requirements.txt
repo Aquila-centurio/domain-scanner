@@ -1,4 +1,0 @@
-flask
-openpyxl
-requests
-python-dateutil

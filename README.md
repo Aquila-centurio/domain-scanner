@@ -1,4 +1,4 @@
-# Domain Scanner — Deploy Guide
+# Domain Scanner 
 
 ## Структура проекта
 

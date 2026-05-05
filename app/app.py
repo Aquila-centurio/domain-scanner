@@ -1,72 +1,58 @@
 """
 app.py — Flask HTTP роуты.
-Никакой логики сканирования здесь нет — только:
-  - принять файл и параметры
-  - поставить задачу в Celery очередь
-  - вернуть task_id клиенту
-  - отдавать статус по task_id из Redis
-  - отдавать результаты в xlsx
+Логика сканирования — в tasks.py (Celery).
+HTML — в templates/index.html (Jinja2).
 """
 
 import io
-import uuid
 import os
+import uuid
 
 import openpyxl
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, jsonify, render_template, request, send_file
 
-from tasks import run_scan, get_state, update_state
+from tasks import get_state, run_scan, update_state
 
 app = Flask(__name__)
 
-# Временная директория для загруженных файлов
-# Файл сохраняем на диск, в Celery передаём только путь — не байты
+# Временная директория для загруженных файлов.
+# Шарится между app и celery_worker через Docker volume.
 UPLOAD_DIR = "/tmp/scanner_uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
-# ── Роуты ─────────────────────────────────────────────────────────────────────
-
 @app.route("/")
 def index():
-    """Отдаём HTML интерфейс."""
-    return get_html()
+    return render_template("index.html")
 
 
 @app.route("/scan", methods=["POST"])
 def start_scan():
     """
-    Принимает файл и параметры, ставит задачу в Celery.
-    Возвращает task_id — по нему клиент будет поллить /status.
-    Несколько сканов могут работать одновременно — у каждого свой task_id.
+    Принимает файл + параметры, ставит задачу в Celery.
+    Возвращает task_id — по нему клиент поллит /status.
     """
     f = request.files.get("file")
     if not f:
         return jsonify({"error": "No file uploaded"}), 400
 
-    # Генерируем уникальный ID для этого скана
-    task_id = str(uuid.uuid4())
-
-    # Читаем параметры из формы
-    min_h     = float(request.form.get("min_hours", 6))
-    max_h     = float(request.form.get("max_hours", 24))
-    limit     = int(request.form.get("limit", 50))
-    min_sd    = int(request.form.get("min_sd_score", 80))
-    max_sd    = int(request.form.get("max_sd_score", 100))
-    max_price = float(request.form.get("max_price", 0))
-
+    task_id  = str(uuid.uuid4())
     filename = f.filename or "upload"
 
-    # Сохраняем файл на диск — НЕ передаём байты через Celery/Redis
-    # 205MB в Redis = OutOfMemoryError. Передаём только путь к файлу.
+    # Сохраняем файл на диск — не гоним 200MB через Redis
     file_path = os.path.join(UPLOAD_DIR, f"{task_id}_{filename}")
     f.save(file_path)
 
-    # Ставим задачу в Celery очередь — Flask сразу возвращает ответ,
-    # не ждёт завершения сканирования
     run_scan.delay(
-        task_id, file_path, filename,
-        min_h, max_h, limit, min_sd, max_sd, max_price,
+        task_id,
+        file_path,
+        filename,
+        float(request.form.get("min_hours", 6)),
+        float(request.form.get("max_hours", 24)),
+        int(request.form.get("limit", 50)),
+        int(request.form.get("min_sd_score", 80)),
+        int(request.form.get("max_sd_score", 100)),
+        float(request.form.get("max_price", 0)),
     )
 
     return jsonify({"status": "started", "task_id": task_id})
@@ -74,10 +60,7 @@ def start_scan():
 
 @app.route("/status")
 def status():
-    """
-    Возвращает текущее состояние скана по task_id.
-    Фронтенд поллит этот эндпоинт каждые 1.5 секунды.
-    """
+    """Текущее состояние скана — фронтенд поллит каждые 1.5с."""
     task_id = request.args.get("task_id")
     if not task_id:
         return jsonify({"error": "task_id required"}), 400
@@ -87,24 +70,21 @@ def status():
         return jsonify({"error": "task not found"}), 404
 
     return jsonify({
-        "running":        state.get("running", False),
-        "step":           state.get("step", ""),
-        "progress":       state.get("progress", 0),
-        "total":          state.get("total", 0),
-        "logs":           state.get("logs", [])[-50:],  # последние 50 строк
-        "results_great":  state.get("results_great", []),
-        "results_good":   state.get("results_good", []),
-        "flagged":        state.get("flagged", []),
-        "stats":          state.get("stats", {}),
+        "running":       state.get("running", False),
+        "step":          state.get("step", ""),
+        "progress":      state.get("progress", 0),
+        "total":         state.get("total", 0),
+        "logs":          state.get("logs", [])[-50:],
+        "results_great": state.get("results_great", []),
+        "results_good":  state.get("results_good", []),
+        "flagged":       state.get("flagged", []),
+        "stats":         state.get("stats", {}),
     })
 
 
 @app.route("/stop", methods=["POST"])
 def stop_scan():
-    """
-    Мягкая остановка скана — выставляем флаг running=False.
-    Celery worker проверяет его перед каждым доменом и завершается.
-    """
+    """Мягкая остановка — Celery worker проверяет флаг перед каждым доменом."""
     task_id = request.args.get("task_id")
     if not task_id:
         return jsonify({"error": "task_id required"}), 400
@@ -115,10 +95,7 @@ def stop_scan():
 
 @app.route("/download")
 def download_xlsx():
-    """
-    Отдаёт результаты скана в xlsx файле.
-    Два листа: Great Domains и Good Domains.
-    """
+    """Отдаёт результаты в xlsx — два листа: Great и Good."""
     task_id = request.args.get("task_id")
     if not task_id:
         return "task_id required", 400
@@ -139,16 +116,13 @@ def download_xlsx():
         "vt_malicious", "vt_suspicious", "url",
     ]
 
-    wb = openpyxl.Workbook()
-
-    # Лист 1: Great (выше max_sd_score)
+    wb  = openpyxl.Workbook()
     ws1 = wb.active
     ws1.title = "Great Domains"
     ws1.append(fields)
     for d in sorted(results_great, key=lambda x: x.get("scamdoc_score", 0), reverse=True):
         ws1.append([d.get(f, "") for f in fields])
 
-    # Лист 2: Good (между min_sd_score и max_sd_score)
     ws2 = wb.create_sheet("Good Domains")
     ws2.append(fields)
     for d in sorted(results_good, key=lambda x: x.get("scamdoc_score", 0), reverse=True):
@@ -166,236 +140,5 @@ def download_xlsx():
     )
 
 
-# ── HTML ───────────────────────────────────────────────────────────────────────
-
-def get_html():
-    """
-    Весь фронтенд в одной функции.
-    Ключевые отличия от оригинала:
-      - startScan() сохраняет task_id из ответа сервера
-      - все запросы /status, /stop, /download передают task_id как query param
-      - можно открыть несколько вкладок с разными сканами одновременно
-    """
-    return (
-        '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">'
-        '<meta name="viewport" content="width=device-width,initial-scale=1.0">'
-        '<title>Domain Scanner</title>'
-        '<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">'
-        '<style>'
-        '*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}'
-        ':root{'
-        '--bg:#0a0e17;--bg2:#111827;--bg3:#1a2234;--border:#1e2d45;'
-        '--text:#c9d1d9;--text-dim:#6b7b8d;--accent:#00e59b;--accent2:#00c4ff;'
-        '--danger:#ff4757;--warning:#ffa502;--success:#00e59b;'
-        '}'
-        'body{font-family:Outfit,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}'
-        'body::before{content:"";position:fixed;inset:0;'
-        'background:radial-gradient(ellipse at 20% 50%,rgba(0,229,155,.03)0%,transparent 50%),'
-        'radial-gradient(ellipse at 80% 20%,rgba(0,196,255,.03)0%,transparent 50%);pointer-events:none}'
-        '.container{max-width:1100px;margin:0 auto;padding:40px 24px;position:relative;z-index:1}'
-        'header{text-align:center;margin-bottom:48px}'
-        'header h1{font-size:2.4rem;font-weight:800;letter-spacing:-1px;'
-        'background:linear-gradient(135deg,var(--accent),var(--accent2));'
-        '-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:8px}'
-        'header p{color:var(--text-dim);font-size:.95rem;font-family:JetBrains Mono,monospace;font-weight:300}'
-        '.card{background:linear-gradient(135deg,#111827,#0d1321);border:1px solid var(--border);'
-        'border-radius:16px;padding:32px;margin-bottom:24px}'
-        '.card h2{font-size:1.1rem;font-weight:600;margin-bottom:24px;color:var(--accent);display:flex;align-items:center;gap:10px}'
-        '.card h2 .dot{width:8px;height:8px;border-radius:50%;background:var(--accent);display:inline-block;box-shadow:0 0 12px var(--accent)}'
-        '.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}'
-        '@media(max-width:640px){.form-grid{grid-template-columns:1fr}}'
-        '.field{display:flex;flex-direction:column;gap:8px}.field.full{grid-column:1/-1}'
-        'label{font-size:.82rem;font-weight:500;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;font-family:JetBrains Mono,monospace}'
-        'input[type="number"],input[type="file"]{background:var(--bg);border:1px solid var(--border);'
-        'border-radius:10px;padding:12px 16px;color:var(--text);font-family:JetBrains Mono,monospace;font-size:.95rem;outline:none;'
-        'transition:border-color .2s,box-shadow .2s}'
-        'input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(0,229,155,.1)}'
-        'input[type="file"]{cursor:pointer;padding:14px 16px}'
-        'input[type="file"]::file-selector-button{background:linear-gradient(135deg,var(--accent),var(--accent2));'
-        'color:#000;border:none;padding:8px 18px;border-radius:8px;font-family:Outfit,sans-serif;font-weight:600;font-size:.85rem;cursor:pointer;margin-right:12px}'
-        '.actions{display:flex;gap:12px;margin-top:28px;grid-column:1/-1}'
-        'button{font-family:Outfit,sans-serif;font-weight:600;font-size:.95rem;border:none;border-radius:10px;padding:14px 32px;cursor:pointer;transition:all .2s}'
-        '.btn-go{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#000;flex:1;box-shadow:0 4px 24px rgba(0,229,155,.2)}'
-        '.btn-go:hover{transform:translateY(-1px);box-shadow:0 6px 32px rgba(0,229,155,.3)}'
-        '.btn-go:disabled{opacity:.4;cursor:not-allowed;transform:none}'
-        '.btn-stop{background:rgba(255,71,87,.15);color:var(--danger);border:1px solid rgba(255,71,87,.3)}'
-        '.btn-stop:hover{background:rgba(255,71,87,.25)}'
-        '.btn-csv{background:rgba(0,229,155,.1);color:var(--accent);border:1px solid rgba(0,229,155,.2)}'
-        '.btn-csv:hover{background:rgba(0,229,155,.2)}'
-        '.progress-bar{height:4px;background:var(--bg);border-radius:4px;margin-bottom:16px;overflow:hidden}'
-        '.progress-fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2));border-radius:4px;transition:width .4s;box-shadow:0 0 16px var(--accent)}'
-        '.step-label{font-family:JetBrains Mono,monospace;font-size:.8rem;color:var(--accent);margin-bottom:12px;display:flex;justify-content:space-between}'
-        '.console{background:#050810;border:1px solid var(--border);border-radius:12px;padding:16px;'
-        'max-height:320px;overflow-y:auto;font-family:JetBrains Mono,monospace;font-size:.78rem;line-height:1.8;scroll-behavior:smooth}'
-        '.console::-webkit-scrollbar{width:6px}.console::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}'
-        '.log-line{display:flex;gap:10px}.log-time{color:var(--text-dim);flex-shrink:0}.log-msg{word-break:break-all}'
-        '.log-line.success .log-msg{color:var(--success)}'
-        '.log-line.error .log-msg{color:var(--danger)}'
-        '.log-line.warning .log-msg{color:var(--warning)}'
-        '.log-line.dim .log-msg{color:var(--text-dim)}'
-        '.results-table{width:100%;border-collapse:collapse;font-size:.85rem}'
-        '.results-table th{text-align:left;padding:12px 14px;font-family:JetBrains Mono,monospace;'
-        'font-size:.72rem;font-weight:500;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;'
-        'border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg2)}'
-        '.results-table td{padding:11px 14px;border-bottom:1px solid rgba(30,45,69,.5);transition:background .15s}'
-        '.results-table tr:hover td{background:rgba(0,229,155,.03)}'
-        '.domain-name{font-family:JetBrains Mono,monospace;font-weight:500;color:var(--accent2)}'
-        '.score-badge{display:inline-block;padding:3px 10px;border-radius:6px;font-family:JetBrains Mono,monospace;font-weight:600;font-size:.82rem}'
-        '.score-high{background:rgba(0,229,155,.15);color:var(--accent)}'
-        '.score-med{background:rgba(255,165,2,.15);color:var(--warning)}'
-        '.vt-clean{color:var(--success)}.vt-flagged{color:var(--danger);font-weight:600}'
-        '.table-wrap{max-height:500px;overflow-y:auto;border-radius:12px;border:1px solid var(--border)}'
-        '.table-wrap::-webkit-scrollbar{width:6px}.table-wrap::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}'
-        '.stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}'
-        '@media(max-width:640px){.stat-grid{grid-template-columns:repeat(2,1fr)}}'
-        '.stat-box{background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:14px 16px;text-align:center}'
-        '.stat-num{font-family:JetBrains Mono,monospace;font-size:1.6rem;font-weight:700;color:var(--accent)}'
-        '.stat-label{font-size:.7rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;margin-top:4px}'
-        '.hidden{display:none}'
-        '@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}'
-        '.scanning .dot{animation:pulse 1.2s infinite}'
-        '.bid-link{color:var(--accent2);text-decoration:none;font-size:.78rem;opacity:.7;transition:opacity .2s}'
-        '.bid-link:hover{opacity:1;text-decoration:underline}'
-        '</style></head><body><div class="container">'
-        '<header><h1>Domain Scanner</h1>'
-        '<p>upload .xlsx or .csv &#8594; auction filter &#8594; scamdoc &#8594; virustotal</p></header>'
-        '<div class="card"><h2><span class="dot"></span> Scan Settings</h2>'
-        '<div class="form-grid">'
-        '<div class="field full"><label>Namecheap File (.xlsx or .csv)</label>'
-        '<input type="file" id="fileInput" accept=".xlsx,.xls,.csv,.tsv"></div>'
-        '<div class="field"><label>Auction Ends (min hours)</label>'
-        '<input type="number" id="minHours" value="3" min="0" step="1"></div>'
-        '<div class="field"><label>Auction Ends (max hours)</label>'
-        '<input type="number" id="maxHours" value="24" min="1" step="1"></div>'
-        '<div class="field"><label>Min ScamDoc Score (skip below)</label>'
-        '<input type="number" id="minSD" value="70" min="0" max="100"></div>'
-        '<div class="field"><label>Great Threshold (above = great)</label>'
-        '<input type="number" id="maxSD" value="80" min="0" max="100"></div>'
-        '<div class="field"><label>Max Price $ (0=any)</label>'
-        '<input type="number" id="maxPrice" value="20" min="0" step="1"></div>'
-        '<div class="field"><label>Max Domains to Check (0=all)</label>'
-        '<input type="number" id="limit" value="50" min="0"></div>'
-        '<div class="actions">'
-        '<button class="btn-go" id="btnScan" onclick="startScan()">Start Scan</button>'
-        '<button class="btn-stop hidden" id="btnStop" onclick="stopScan()">Stop</button>'
-        '</div></div></div>'
-        '<div class="card hidden" id="progressCard">'
-        '<h2 class="scanning"><span class="dot"></span> <span id="stepLabel">Scanning...</span></h2>'
-        '<div class="step-label"><span id="progressText">0 / 0</span><span id="progressPct">0%</span></div>'
-        '<div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>'
-        '<div class="console" id="logConsole"></div></div>'
-        '<div class="card hidden" id="resultsGreatCard">'
-        '<h2><span class="dot" style="background:var(--accent)"></span> Great Domains</h2>'
-        '<div class="stat-grid" id="statGrid"></div>'
-        '<div class="table-wrap"><table class="results-table"><thead><tr>'
-        '<th>#</th><th>Domain</th><th>ScamDoc</th><th>Ends In</th>'
-        '<th>Price</th><th>Bids</th><th>Registered</th><th>DR</th><th>VT</th><th></th>'
-        '</tr></thead><tbody id="greatBody"></tbody></table></div></div>'
-        '<div class="card hidden" id="resultsGoodCard">'
-        '<h2><span class="dot" style="background:var(--warning)"></span> Good Domains</h2>'
-        '<div class="table-wrap"><table class="results-table"><thead><tr>'
-        '<th>#</th><th>Domain</th><th>ScamDoc</th><th>Ends In</th>'
-        '<th>Price</th><th>Bids</th><th>Registered</th><th>DR</th><th>VT</th><th></th>'
-        '</tr></thead><tbody id="goodBody"></tbody></table></div></div>'
-        '<div class="card hidden" id="downloadCard">'
-        '<button class="btn-csv" onclick="downloadXlsx()">Download Results (.xlsx)</button>'
-        '</div></div>'
-        '<script>'
-        # task_id хранится в памяти вкладки — каждая вкладка независима
-        'let pollTimer=null,lastLogCount=0,currentTaskId=null;'
-
-        'function startScan(){'
-        'const fi=document.getElementById("fileInput");'
-        'if(!fi.files.length){alert("Select a file first.");return}'
-        'const fd=new FormData();'
-        'fd.append("file",fi.files[0]);'
-        'fd.append("min_hours",document.getElementById("minHours").value);'
-        'fd.append("max_hours",document.getElementById("maxHours").value);'
-        'fd.append("limit",document.getElementById("limit").value);'
-        'fd.append("min_sd_score",document.getElementById("minSD").value);'
-        'fd.append("max_sd_score",document.getElementById("maxSD").value);'
-        'fd.append("max_price",document.getElementById("maxPrice").value);'
-        'document.getElementById("btnScan").disabled=true;'
-        'document.getElementById("btnStop").classList.remove("hidden");'
-        'document.getElementById("progressCard").classList.remove("hidden");'
-        'document.getElementById("resultsGreatCard").classList.add("hidden");'
-        'document.getElementById("resultsGoodCard").classList.add("hidden");'
-        'document.getElementById("downloadCard").classList.add("hidden");'
-        'document.getElementById("logConsole").innerHTML="";'
-        'document.getElementById("greatBody").innerHTML="";'
-        'document.getElementById("goodBody").innerHTML="";'
-        'lastLogCount=0;'
-        'fetch("/scan",{method:"POST",body:fd})'
-        # сохраняем task_id который вернул сервер
-        '.then(r=>r.json()).then(d=>{'
-        'if(d.error){alert(d.error);resetUI();return}'
-        'currentTaskId=d.task_id;'
-        'pollTimer=setInterval(pollStatus,1500)})'
-        '.catch(e=>{alert("Error: "+e);resetUI()})}'
-
-        'function stopScan(){'
-        'if(!currentTaskId)return;'
-        'fetch("/stop?task_id="+currentTaskId,{method:"POST"})}'
-
-        'function pollStatus(){'
-        'if(!currentTaskId)return;'
-        'fetch("/status?task_id="+currentTaskId).then(r=>r.json()).then(data=>{'
-        'const pct=data.total>0?Math.round((data.progress/data.total)*100):0;'
-        'document.getElementById("progressFill").style.width=pct+"%";'
-        'document.getElementById("progressPct").textContent=pct+"%";'
-        'document.getElementById("progressText").textContent=data.progress+" / "+data.total;'
-        'const steps={filtering:"Filtering...",scamdoc:"ScamDoc Scan",virustotal:"VirusTotal Scan",done:"Complete"};'
-        'document.getElementById("stepLabel").textContent=steps[data.step]||data.step;'
-        'if(data.logs.length>lastLogCount){'
-        'const c=document.getElementById("logConsole");'
-        'data.logs.slice(lastLogCount).forEach(l=>{'
-        'c.innerHTML+=\'<div class="log-line \'+l.level+\'"><span class="log-time">\'+l.time+\'</span><span class="log-msg">\'+escHtml(l.msg)+\'</span></div>\'});'
-        'c.scrollTop=c.scrollHeight;lastLogCount=data.logs.length}'
-        'if(data.results_great.length>0||data.results_good.length>0||data.flagged.length>0)'
-        'renderResults(data.results_great,data.results_good,data.flagged,data.stats);'
-        'if(!data.running&&data.step==="done"){clearInterval(pollTimer);resetUI()}})}'
-
-        'function buildRows(list){'
-        'return list.sort((a,b)=>(b.scamdoc_score||0)-(a.scamdoc_score||0))'
-        '.map((d,i)=>{'
-        'const sc=d.scamdoc_score||0;const cls=sc>=80?"score-high":"score-med";'
-        'const vtCls=(d.vt_malicious||0)===0?"vt-clean":"vt-flagged";'
-        'const vtTxt=(d.vt_malicious||0)===0?"Clean":d.vt_malicious+" flags";'
-        'const price=d.price>0?"$"+d.price:"-";'
-        'const dr=d.ahrefs_dr>0?Math.round(d.ahrefs_dr):"-";'
-        'return "<tr><td style=\\"color:var(--text-dim)\\">"+(i+1)+"</td>"'
-        '+"<td class=\\"domain-name\\">"+escHtml(d.domain)+"</td>"'
-        '+"<td><span class=\\"score-badge "+cls+"\\">"+sc+"%</span></td>"'
-        '+"<td>"+d.hours_left+"h</td>"'
-        '+"<td style=\\"color:var(--warning)\\">"+price+"</td>"'
-        '+"<td>"+(d.bid_count||0)+"</td>"'
-        '+"<td style=\\"color:var(--text-dim)\\">"+(d.reg_date||"")+"</td>"'
-        '+"<td>"+dr+"</td>"'
-        '+"<td class=\\""+vtCls+"\\">"+vtTxt+"</td>"'
-        '+"<td><a href=\\""+escHtml(d.url||"#")+"\\" target=\\"_blank\\" class=\\"bid-link\\">Bid &#8594;</a></td></tr>"'
-        '}).join("")}'
-
-        'function renderResults(great,good,flagged,stats){'
-        'document.getElementById("statGrid").innerHTML='
-        'statBox(great.length,"Great")+statBox(good.length,"Good")'
-        '+statBox(flagged.length,"VT Flagged")+statBox(stats.reg_2000_2016||0,"Reg 00-16");'
-        'if(great.length>0){'
-        'document.getElementById("resultsGreatCard").classList.remove("hidden");'
-        'document.getElementById("greatBody").innerHTML=buildRows(great)}'
-        'if(good.length>0){'
-        'document.getElementById("resultsGoodCard").classList.remove("hidden");'
-        'document.getElementById("goodBody").innerHTML=buildRows(good)}'
-        'if(great.length>0||good.length>0)document.getElementById("downloadCard").classList.remove("hidden")}'
-
-        'function statBox(n,l){return \'<div class="stat-box"><div class="stat-num">\'+n+\'</div><div class="stat-label">\'+l+\'</div></div>\'}'
-        'function resetUI(){document.getElementById("btnScan").disabled=false;document.getElementById("btnStop").classList.add("hidden")}'
-        'function downloadXlsx(){if(currentTaskId)window.location.href="/download?task_id="+currentTaskId}'
-        'function escHtml(s){const d=document.createElement("div");d.textContent=s;return d.innerHTML}'
-        '</script></body></html>'
-    )
-
-
 if __name__ == "__main__":
-    # Только для локальной разработки без Docker
-    # В продакшене запускается через Gunicorn
     app.run(host="127.0.0.1", port=8080, debug=True)

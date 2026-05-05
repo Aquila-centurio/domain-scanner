@@ -24,6 +24,7 @@ services:
   app:
     build: ./app
     restart: always
+    env_file: .env
     environment:
       - REDIS_URL=redis://redis:6379/0
     volumes:
@@ -36,6 +37,7 @@ services:
   celery_worker:
     build: ./app
     restart: always
+    env_file: .env
     environment:
       - REDIS_URL=redis://redis:6379/0
     volumes:
@@ -52,7 +54,6 @@ services:
     ports:
       - "80:80"
     volumes:
-      # Используем dev конфиг без SSL
       - ./nginx/nginx.dev.conf:/etc/nginx/nginx.conf:ro
     depends_on:
       - app
