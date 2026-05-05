@@ -1,0 +1,20 @@
+# Web framework
+flask==3.1.0
+
+# WSGI сервер (замена встроенному Flask dev-серверу)
+gunicorn==23.0.0
+
+# HTTP клиент для запросов к ScamDoc / VirusTotal
+requests==2.32.3
+
+# Excel файлы
+openpyxl==3.1.5
+
+# Redis клиент (хранение состояния сканов)
+redis==5.2.1
+
+# Celery — очередь фоновых задач
+celery==5.4.0
+
+# Нужен Celery для корректной работы воркеров
+celery[redis]==5.4.0

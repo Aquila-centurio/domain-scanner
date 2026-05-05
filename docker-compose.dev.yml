@@ -1,0 +1,62 @@
+# docker-compose.dev.yml — локальная разработка
+# Запуск: docker compose -f docker-compose.dev.yml up --build
+#
+# Отличия от продакшена:
+#   - Nginx без SSL и без Basic Auth
+#   - Нет certbot
+#   - Код монтируется как volume — изменения без пересборки образа
+
+services:
+
+  redis:
+    image: redis:7-alpine
+    restart: always
+    volumes:
+      - redis_data:/data
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
+    command: redis-server /usr/local/etc/redis/redis.conf
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  app:
+    build: ./app
+    restart: always
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./app:/app
+      - uploads_data:/tmp/scanner_uploads
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  celery_worker:
+    build: ./app
+    restart: always
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./app:/app
+      - uploads_data:/tmp/scanner_uploads
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: celery -A tasks worker --loglevel=info -c 2
+
+  nginx:
+    image: nginx:alpine
+    restart: always
+    ports:
+      - "80:80"
+    volumes:
+      # Используем dev конфиг без SSL
+      - ./nginx/nginx.dev.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - app
+
+volumes:
+  redis_data:
+  uploads_data:
