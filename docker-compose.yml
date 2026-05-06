@@ -1,14 +1,11 @@
 services:
 
   # ── Redis ────────────────────────────────────────────────────────────────────
-  # Используется как:
-  #   1. Брокер задач для Celery (очередь сканирований)
-  #   2. Хранилище состояния сканов (прогресс, логи, результаты)
   redis:
-    image: redis:7-alpine          # alpine — минимальный образ
+    image: redis:7-alpine
     restart: always
     volumes:
-      - redis_data:/data           # персистентность — данные не теряются при рестарте
+      - redis_data:/data
       - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
     command: redis-server /usr/local/etc/redis/redis.conf
     healthcheck:
@@ -18,66 +15,57 @@ services:
       retries: 5
 
   # ── Flask + Gunicorn ─────────────────────────────────────────────────────────
-  # HTTP сервер: принимает запросы, читает/пишет состояние в Redis,
-  # ставит задачи сканирования в очередь Celery
   app:
     build: ./app
     restart: always
-    environment:
-      - REDIS_URL=redis://redis:6379/0   # адрес Redis внутри docker сети
-    depends_on:
-      redis:
-        condition: service_healthy       # ждём пока Redis поднимется
-    # порт наружу не открываем — только Nginx будет обращаться к app
-
-  # ── Celery Worker ────────────────────────────────────────────────────────────
-  # Отдельный процесс для выполнения тяжёлых задач:
-  # ScamDoc + VirusTotal сканирование (может идти минутами)
-  # Flask не блокируется — просто ставит задачу и возвращает task_id
-  celery_worker:
-    build: ./app                         # тот же образ что и app
-    restart: always
+    env_file: .env                         # API ключи из .env
     environment:
       - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - uploads_data:/tmp/scanner_uploads  # шарим загрузки с celery_worker
     depends_on:
       redis:
         condition: service_healthy
-    # запускаем celery вместо gunicorn
-    # --loglevel=info — видно что происходит в логах
-    # -c 2            — 2 параллельных воркера (2 скана одновременно)
+
+  # ── Celery Worker ─────────────────────────────────────────────────────────────
+  celery_worker:
+    build: ./app
+    restart: always
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - uploads_data:/tmp/scanner_uploads  # тот же volume что и у app
+    depends_on:
+      redis:
+        condition: service_healthy
     command: celery -A tasks worker --loglevel=info -c 2
 
   # ── Nginx ────────────────────────────────────────────────────────────────────
-  # Reverse proxy:
-  #   - SSL termination (HTTPS)
-  #   - Basic Auth (логин/пароль)
-  #   - Проксирует запросы в app:8000
   nginx:
     image: nginx:alpine
     restart: always
     ports:
-      - "80:80"     # HTTP → редирект на HTTPS
-      - "443:443"   # HTTPS
+      - "80:80"
+      - "443:443"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/htpasswd:/etc/nginx/.htpasswd:ro    # файл с логинами/паролями
-      - certbot_certs:/etc/letsencrypt:ro            # SSL сертификаты
-      - certbot_www:/var/www/certbot:ro              # для верификации certbot
+      - ./nginx/htpasswd:/etc/nginx/.htpasswd:ro
+      - certbot_certs:/etc/letsencrypt:ro
+      - certbot_www:/var/www/certbot:ro
     depends_on:
       - app
 
   # ── Certbot ──────────────────────────────────────────────────────────────────
-  # Получение и обновление SSL сертификатов Let's Encrypt
-  # Запускается отдельно (не постоянный сервис)
   certbot:
     image: certbot/certbot
     volumes:
       - certbot_certs:/etc/letsencrypt
       - certbot_www:/var/www/certbot
-    # профиль standalone — не запускается при обычном docker compose up
     profiles: ["certbot"]
 
 volumes:
-  redis_data:      # данные Redis
-  certbot_certs:   # SSL сертификаты
-  certbot_www:     # временные файлы certbot
+  redis_data:
+  uploads_data:
+  certbot_certs:
+  certbot_www:

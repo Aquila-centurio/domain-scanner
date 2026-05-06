@@ -1,67 +1,86 @@
-# Domain Scanner 
+# Domain Scanner
 
-## Структура проекта
+Инструмент для анализа дропающихся доменов на аукционах Namecheap.
+
+**Стек:** Flask · Celery · Redis · Nginx · Docker Compose
+
+## Как работает
+
+1. Загружаешь `.xlsx` или `.csv` экспорт из Namecheap Marketplace
+2. Фильтрация: только `.com`, зарегистрированные в 2000–2016, аукцион заканчивается в заданном окне, цена в лимите
+3. Каждый домен проверяется через **ScamDoc** (доверие в %)
+4. Прошедшие порог — через **VirusTotal** (malicious/suspicious флаги)
+5. Результаты появляются в реальном времени, выгрузка в `.xlsx`
+
+Несколько пользователей могут запускать сканы одновременно — у каждого свой `task_id`.
+
+## Структура
 
 ```
 domain_scanner/
 ├── app/
-│   ├── app.py              # Flask — HTTP роуты
+│   ├── app.py              # Flask роуты
 │   ├── tasks.py            # Celery — логика сканирования
+│   ├── config.py           # Настройки из env
 │   ├── requirements.txt
-│   └── Dockerfile
+│   ├── Dockerfile
+│   └── templates/
+│       └── index.html      # Веб-интерфейс
 ├── nginx/
-│   ├── nginx.conf          # конфиг reverse proxy
-│   └── htpasswd            # логины/пароли (генерируется)
+│   ├── nginx.conf          # Продакшен (SSL + Basic Auth)
+│   └── nginx.dev.conf      # Dev (без SSL)
 ├── redis/
 │   └── redis.conf
-├── docker-compose.yml
-└── README.md
+├── docker-compose.yml      # Продакшен
+├── docker-compose.dev.yml  # Локальная разработка
+├── .env.example            # Шаблон переменных окружения
+└── .gitignore
 ```
 
-## Локальный запуск (без SSL, без Basic Auth)
+## Локальный запуск
 
 ```bash
-# 1. Создать .venv для разработки (опционально, для IDE)
-python -m venv app/.venv
-source app/.venv/bin/activate
-pip install -r app/requirements.txt
+# 1. Переменные окружения
+cp .env.example .env
+nano .env  # вписать ключи API
 
-# 2. Запустить через Docker Compose
-docker compose up --build
+# 2. Запуск
+docker compose -f docker-compose.dev.yml up --build
 
 # Открыть http://localhost
 ```
 
 ## Деплой на VPS
 
-### 1. Подготовка сервера
+### Требования
+- Ubuntu 22.04+
+- Docker + Docker Compose Plugin
+- Домен с A-записью на IP сервера
+
+### Установка
+
 ```bash
+# Docker
 apt update && apt install -y docker.io docker-compose-plugin
-```
 
-### 2. Клонировать проект
-```bash
-git clone <repo> /opt/domain_scanner
-cd /opt/domain_scanner
-```
+# Проект
+git clone <repo> /opt/domain-scanner
+cd /opt/domain-scanner
 
-### 3. Заменить домен в nginx.conf
-```bash
-sed -i 's/YOUR_DOMAIN.com/yourdomain.com/g' nginx/nginx.conf
-```
+# Переменные окружения
+cp .env.example .env
+nano .env
 
-### 4. Создать файл паролей Basic Auth
-```bash
-# Установить htpasswd если нет
+# Basic Auth (логин/пароль для входа на сайт)
 apt install -y apache2-utils
-
-# Создать пользователя (запросит пароль)
 htpasswd -c nginx/htpasswd username
 ```
 
-### 5. Получить SSL сертификат
+### SSL сертификат
+
 ```bash
-# Сначала поднять nginx без SSL (закомментировать 443 блок временно)
+# Временно поднять nginx только на 80 порту
+# (закомментировать 443 блок в nginx/nginx.conf)
 docker compose up -d nginx
 
 # Получить сертификат
@@ -71,35 +90,53 @@ docker compose run --rm certbot certonly \
   --email your@email.com \
   --agree-tos
 
-# Раскомментировать 443 блок, перезапустить
+# Вписать домен в nginx.conf
+sed -i 's/YOUR_DOMAIN.com/yourdomain.com/g' nginx/nginx.conf
+
+# Раскомментировать 443 блок и перезапустить
 docker compose restart nginx
 ```
 
-### 6. Запустить всё
+### Запуск
+
 ```bash
 docker compose up -d
 ```
 
-### 7. Проверить логи
-```bash
-docker compose logs -f app
-docker compose logs -f celery_worker
-```
+### Обновление
 
-## Обновление приложения
 ```bash
 git pull
 docker compose up -d --build app celery_worker
 ```
 
-## Мониторинг
+## Управление
+
 ```bash
-# Статус всех сервисов
+# Статус сервисов
 docker compose ps
 
 # Логи в реальном времени
 docker compose logs -f
 
-# Redis — сколько памяти используется
-docker compose exec redis redis-cli info memory
+# Логи конкретного сервиса
+docker compose logs -f app
+docker compose logs -f celery_worker
+
+# Остановка
+docker compose down
 ```
+
+## Переменные окружения
+
+| Переменная | Описание |
+|---|---|
+| `REDIS_URL` | URL Redis (default: `redis://redis:6379/0`) |
+| `RAPIDAPI_KEY` | Ключ RapidAPI (ScamDoc) |
+| `VT_API_KEY` | Ключ VirusTotal |
+
+## Ограничения
+
+- **ScamDoc:** пауза 1.5с между запросами (лимит API)
+- **VirusTotal:** пауза 16с между запросами (free tier: 4 req/min)
+- Скорость сканирования определяется лимитами API, не железом
