@@ -18,3 +18,5 @@ celery==5.4.0
 
 # Нужен Celery для корректной работы воркеров
 celery[redis]==5.4.0
+
+gevent

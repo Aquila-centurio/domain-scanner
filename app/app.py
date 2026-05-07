@@ -1,26 +1,32 @@
-"""
-app.py — Flask HTTP роуты.
-Логика сканирования — в tasks.py (Celery).
-HTML — в templates/index.html (Jinja2).
-"""
-
+import openpyxl
 import io
 import os
 import uuid
+from pathlib import Path
 
-import openpyxl
-from flask import Flask, jsonify, render_template, request, send_file
+from flask import Flask, jsonify, render_template, request, send_file, current_app
+from werkzeug.utils import secure_filename
 
 from tasks import get_state, run_scan, update_state
 
 app = Flask(__name__)
 
-# Временная директория для загруженных файлов.
-# Шарится между app и celery_worker через Docker volume.
+# ====================== НАСТРОЙКИ ======================
 UPLOAD_DIR = "/tmp/scanner_uploads"
+ALLOWED_EXTENSIONS = {'.csv', '.tsv', '.xlsx'}
+
+# Создаём папку при старте
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+# ====================== УТИЛИТЫ ======================
+def allowed_file(filename: str) -> bool:
+    """Проверка разрешённых расширений"""
+    if not filename:
+        return False
+    return Path(filename).suffix.lower() in ALLOWED_EXTENSIONS
 
+
+# ====================== РОУТЫ ======================
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -28,66 +34,102 @@ def index():
 
 @app.route("/scan", methods=["POST"])
 def start_scan():
-    """
-    Принимает файл + параметры, ставит задачу в Celery.
-    Возвращает task_id — по нему клиент поллит /status.
-    """
-    f = request.files.get("file")
-    if not f:
-        return jsonify({"error": "No file uploaded"}), 400
+    """Принимает файл и параметры, сохраняет файл на диск и ставит задачу в Celery."""
+    
+    if 'file' not in request.files:
+        return jsonify({"error": "No file part in request"}), 400
 
-    task_id  = str(uuid.uuid4())
-    filename = f.filename or "upload"
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No selected file"}), 400
 
-    # Сохраняем файл на диск — не гоним 200MB через Redis
-    file_path = os.path.join(UPLOAD_DIR, f"{task_id}_{filename}")
-    f.save(file_path)
+    if not allowed_file(file.filename):
+        return jsonify({"error": f"File type not allowed. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"}), 400
 
-    run_scan.delay(
-        task_id,
-        file_path,
-        filename,
-        float(request.form.get("min_hours", 6)),
-        float(request.form.get("max_hours", 24)),
-        int(request.form.get("limit", 50)),
-        int(request.form.get("min_sd_score", 80)),
-        int(request.form.get("max_sd_score", 100)),
-        float(request.form.get("max_price", 0)),
-    )
+    # Безопасное имя файла
+    secure_name = secure_filename(file.filename)
+    task_id = str(uuid.uuid4())
+    file_path = os.path.join(UPLOAD_DIR, f"{task_id}_{secure_name}")
 
-    return jsonify({"status": "started", "task_id": task_id})
+    try:
+        # Сохраняем файл на диск (gevent + nginx должны это нормально тянуть)
+        file.save(file_path)
+        current_app.logger.info(f"File saved: {file_path} ({os.path.getsize(file_path) / (1024*1024):.1f} MB)")
+    except Exception as e:
+        current_app.logger.error(f"Failed to save file: {e}")
+        return jsonify({"error": "Failed to save uploaded file"}), 500
+
+    try:
+        # Параметры с дефолтными значениями и валидацией
+        min_hours = float(request.form.get("min_hours", 6))
+        max_hours = float(request.form.get("max_hours", 24))
+        limit = int(request.form.get("limit", 50))
+        min_sd_score = int(request.form.get("min_sd_score", 80))
+        max_sd_score = int(request.form.get("max_sd_score", 100))
+        max_price = float(request.form.get("max_price", 0))
+
+        # Базовая валидация
+        if min_hours >= max_hours:
+            return jsonify({"error": "min_hours must be less than max_hours"}), 400
+        if min_sd_score > max_sd_score:
+            return jsonify({"error": "min_sd_score must be <= max_sd_score"}), 400
+
+        # Отправляем задачу в Celery
+        run_scan.delay(
+            task_id=task_id,
+            file_path=file_path,
+            filename=secure_name,
+            min_hours=min_hours,
+            max_hours=max_hours,
+            limit=limit,
+            min_sd_score=min_sd_score,
+            max_sd_score=max_sd_score,
+            max_price=max_price,
+        )
+
+        return jsonify({
+            "status": "started",
+            "task_id": task_id,
+            "message": "File received and scan started"
+        }), 202
+
+    except ValueError as e:
+        return jsonify({"error": "Invalid parameter value"}), 400
+    except Exception as e:
+        current_app.logger.error(f"Error starting scan: {e}")
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route("/status")
 def status():
-    """Текущее состояние скана — фронтенд поллит каждые 1.5с."""
+    """Возвращает текущее состояние задачи."""
     task_id = request.args.get("task_id")
     if not task_id:
-        return jsonify({"error": "task_id required"}), 400
+        return jsonify({"error": "task_id is required"}), 400
 
     state = get_state(task_id)
     if not state:
-        return jsonify({"error": "task not found"}), 404
+        return jsonify({"error": "Task not found"}), 404
 
     return jsonify({
-        "running":       state.get("running", False),
-        "step":          state.get("step", ""),
-        "progress":      state.get("progress", 0),
-        "total":         state.get("total", 0),
-        "logs":          state.get("logs", [])[-50:],
+        "running": state.get("running", False),
+        "step": state.get("step", ""),
+        "progress": state.get("progress", 0),
+        "total": state.get("total", 0),
+        "logs": state.get("logs", [])[-50:],
         "results_great": state.get("results_great", []),
-        "results_good":  state.get("results_good", []),
-        "flagged":       state.get("flagged", []),
-        "stats":         state.get("stats", {}),
+        "results_good": state.get("results_good", []),
+        "flagged": state.get("flagged", []),
+        "stats": state.get("stats", {}),
     })
 
 
 @app.route("/stop", methods=["POST"])
 def stop_scan():
-    """Мягкая остановка — Celery worker проверяет флаг перед каждым доменом."""
+    """Мягкая остановка сканирования."""
     task_id = request.args.get("task_id")
     if not task_id:
-        return jsonify({"error": "task_id required"}), 400
+        return jsonify({"error": "task_id is required"}), 400
 
     update_state(task_id, running=False)
     return jsonify({"status": "stopping"})
@@ -95,20 +137,20 @@ def stop_scan():
 
 @app.route("/download")
 def download_xlsx():
-    """Отдаёт результаты в xlsx — два листа: Great и Good."""
+    """Скачивание результатов в Excel."""
     task_id = request.args.get("task_id")
     if not task_id:
-        return "task_id required", 400
+        return "task_id is required", 400
 
     state = get_state(task_id)
     if not state:
-        return "task not found", 404
+        return "Task not found", 404
 
     results_great = state.get("results_great", [])
-    results_good  = state.get("results_good", [])
+    results_good = state.get("results_good", [])
 
     if not results_great and not results_good:
-        return "No results", 404
+        return "No results available", 404
 
     fields = [
         "domain", "scamdoc_score", "hours_left", "end_date", "price",
@@ -116,10 +158,11 @@ def download_xlsx():
         "vt_malicious", "vt_suspicious", "url",
     ]
 
-    wb  = openpyxl.Workbook()
+    wb = openpyxl.Workbook()
     ws1 = wb.active
     ws1.title = "Great Domains"
     ws1.append(fields)
+
     for d in sorted(results_great, key=lambda x: x.get("scamdoc_score", 0), reverse=True):
         ws1.append([d.get(f, "") for f in fields])
 
@@ -136,9 +179,9 @@ def download_xlsx():
         mem,
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         as_attachment=True,
-        download_name="domain_results.xlsx",
+        download_name=f"domain_results_{task_id[:8]}.xlsx",
     )
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=8080, debug=True)
+    app.run(host="0.0.0.0", port=8080, debug=True)

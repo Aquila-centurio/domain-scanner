@@ -48,7 +48,6 @@
       z-index: 1;
     }
 
-    /* ── Header ── */
     header { text-align: center; margin-bottom: 48px; }
     header h1 {
       font-size: 2.4rem;
@@ -66,7 +65,6 @@
       font-weight: 300;
     }
 
-    /* ── Card ── */
     .card {
       background: linear-gradient(135deg, #111827, #0d1321);
       border: 1px solid var(--border);
@@ -91,7 +89,6 @@
       box-shadow: 0 0 12px var(--accent);
     }
 
-    /* ── Form ── */
     .form-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -179,7 +176,6 @@
     }
     .btn-csv:hover { background: rgba(0,229,155,.2); }
 
-    /* ── Progress ── */
     .progress-bar {
       height: 4px;
       background: var(--bg);
@@ -191,7 +187,7 @@
       height: 100%;
       background: linear-gradient(90deg, var(--accent), var(--accent2));
       border-radius: 4px;
-      transition: width .4s;
+      transition: width .3s;
       box-shadow: 0 0 16px var(--accent);
     }
     .step-label {
@@ -203,7 +199,6 @@
       justify-content: space-between;
     }
 
-    /* ── Console ── */
     .console {
       background: #050810;
       border: 1px solid var(--border);
@@ -227,7 +222,6 @@
     .log-line.warning .log-msg { color: var(--warning); }
     .log-line.dim     .log-msg { color: var(--text-dim); }
 
-    /* ── Results table ── */
     .results-table { width: 100%; border-collapse: collapse; font-size: .85rem; }
     .results-table th {
       text-align: left;
@@ -273,7 +267,6 @@
     .table-wrap::-webkit-scrollbar       { width: 6px; }
     .table-wrap::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 
-    /* ── Stats ── */
     .stat-grid {
       display: grid;
       grid-template-columns: repeat(4, 1fr);
@@ -291,7 +284,6 @@
     .stat-num   { font-family: var(--mono); font-size: 1.6rem; font-weight: 700; color: var(--accent); }
     .stat-label { font-size: .7rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px; margin-top: 4px; }
 
-    /* ── Misc ── */
     .hidden { display: none; }
     .bid-link {
       color: var(--accent2);
@@ -304,6 +296,18 @@
 
     @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
     .scanning .dot { animation: pulse 1.2s infinite; }
+
+    /* Filter status badge */
+    .filter-info {
+      font-family: var(--mono);
+      font-size: .78rem;
+      color: var(--text-dim);
+      margin-top: 10px;
+      min-height: 20px;
+    }
+    .filter-info.ok { color: var(--accent); }
+    .filter-info.warn { color: var(--warning); }
+    .filter-info.err { color: var(--danger); }
   </style>
 </head>
 <body>
@@ -311,26 +315,27 @@
 
   <header>
     <h1>Domain Scanner</h1>
-    <p>upload .xlsx or .csv &rarr; auction filter &rarr; scamdoc &rarr; virustotal</p>
+    <p>filter in browser &rarr; upload filtered rows &rarr; scamdoc &rarr; virustotal</p>
   </header>
 
-  <!-- ── Settings ── -->
+  <!-- Settings -->
   <div class="card">
     <h2><span class="dot"></span> Scan Settings</h2>
     <div class="form-grid">
 
       <div class="field full">
-        <label>Namecheap File (.xlsx or .csv)</label>
-        <input type="file" id="fileInput" accept=".xlsx,.xls,.csv,.tsv">
+        <label>Namecheap File (.csv or .tsv)</label>
+        <input type="file" id="fileInput" accept=".csv,.tsv" onchange="onFileChange()">
+        <div class="filter-info" id="filterInfo"></div>
       </div>
 
       <div class="field">
         <label>Auction Ends (min hours)</label>
-        <input type="number" id="minHours" value="3" min="0" step="1">
+        <input type="number" id="minHours" value="3" min="0" step="1" onchange="onFileChange()">
       </div>
       <div class="field">
         <label>Auction Ends (max hours)</label>
-        <input type="number" id="maxHours" value="24" min="1" step="1">
+        <input type="number" id="maxHours" value="24" min="1" step="1" onchange="onFileChange()">
       </div>
       <div class="field">
         <label>Min ScamDoc Score (skip below)</label>
@@ -342,7 +347,7 @@
       </div>
       <div class="field">
         <label>Max Price $ (0 = any)</label>
-        <input type="number" id="maxPrice" value="20" min="0" step="1">
+        <input type="number" id="maxPrice" value="20" min="0" step="1" onchange="onFileChange()">
       </div>
       <div class="field">
         <label>Max Domains to Check (0 = all)</label>
@@ -356,7 +361,7 @@
     </div>
   </div>
 
-  <!-- ── Progress ── -->
+  <!-- Progress -->
   <div class="card hidden" id="progressCard">
     <h2 class="scanning"><span class="dot"></span> <span id="stepLabel">Scanning...</span></h2>
     <div class="step-label">
@@ -369,7 +374,7 @@
     <div class="console" id="logConsole"></div>
   </div>
 
-  <!-- ── Great results ── -->
+  <!-- Great results -->
   <div class="card hidden" id="resultsGreatCard">
     <h2><span class="dot"></span> Great Domains</h2>
     <div class="stat-grid" id="statGrid"></div>
@@ -384,7 +389,7 @@
     </div>
   </div>
 
-  <!-- ── Good results ── -->
+  <!-- Good results -->
   <div class="card hidden" id="resultsGoodCard">
     <h2><span class="dot" style="background:var(--warning)"></span> Good Domains</h2>
     <div class="table-wrap">
@@ -398,29 +403,154 @@
     </div>
   </div>
 
-  <!-- ── Download ── -->
+  <!-- Download -->
   <div class="card hidden" id="downloadCard">
     <button class="btn-csv" onclick="downloadXlsx()">Download Results (.xlsx)</button>
   </div>
 
-</div><!-- /container -->
+</div>
 
 <script>
-  // task_id живёт в памяти вкладки — каждая вкладка независима
-  let pollTimer = null, lastLogCount = 0, currentTaskId = null;
+  let pollTimer = null, lastLogCount = 0;
+  let currentTaskId = localStorage.getItem('currentTaskId');
+  if (currentTaskId) {
+    document.getElementById('progressCard').classList.remove('hidden');
+    document.getElementById('btnScan').disabled = true;
+    document.getElementById('btnStop').classList.remove('hidden');
+    pollStatus();
+    pollTimer = setInterval(pollStatus, 1500);
+  }
+
+  // ── Client-side CSV filtering ──────────────────────────────────────────────
+
+  let filteredCsvBlob = null;  // результат фильтрации — готов к отправке
+
+  function parseCSVLine(line) {
+    // Простой парсер CSV с учётом кавычек
+    const result = [];
+    let cur = '', inQ = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (c === '"') { inQ = !inQ; }
+      else if (c === ',' && !inQ) { result.push(cur); cur = ''; }
+      else { cur += c; }
+    }
+    result.push(cur);
+    return result;
+  }
+
+  function filterCSV(text, minHours, maxHours, maxPrice) {
+    const lines = text.split('\n');
+    if (lines.length < 2) return { blob: null, total: 0, passed: 0, header: '' };
+
+    const header = lines[0];
+    const now = Date.now();
+    const windowStart = now + minHours * 3600 * 1000;
+    const windowEnd   = now + maxHours * 3600 * 1000;
+
+    let total = 0, passed = 0;
+    const kept = [];
+
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      total++;
+
+      const parts = parseCSVLine(line);
+      if (parts.length < 15) continue;
+
+      // col 1 = domain
+      const domain = (parts[1] || '').trim().toLowerCase();
+      if (!domain.endsWith('.com')) continue;
+
+      // col 14 = registeredDate
+      const regStr = (parts[14] || '').trim();
+      if (!regStr) continue;
+      const regYear = parseInt(regStr.slice(0, 4), 10);
+      if (isNaN(regYear) || regYear < 2000 || regYear > 2016) continue;
+
+      // col 3 = endDate
+      const endStr = (parts[3] || '').trim();
+      let endTs;
+      try { endTs = new Date(endStr).getTime(); } catch(e) { continue; }
+      if (isNaN(endTs)) continue;
+      if (endTs < windowStart || endTs > windowEnd) continue;
+
+      // col 4 = price
+      const price = parseFloat(parts[4]);
+      if (maxPrice > 0 && price > maxPrice) continue;
+
+      passed++;
+      kept.push(line);
+    }
+
+    if (kept.length === 0) return { blob: null, total, passed: 0, header };
+
+    const csvContent = header + '\n' + kept.join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv' });
+    return { blob, total, passed, header };
+  }
+
+  let filterDebounce = null;
+  function onFileChange() {
+    filteredCsvBlob = null;
+    const info = document.getElementById('filterInfo');
+    const fi = document.getElementById('fileInput');
+    if (!fi.files.length) { info.textContent = ''; return; }
+
+    const file = fi.files[0];
+    // Только CSV/TSV поддерживается для клиентской фильтрации
+    const ext = file.name.split('.').pop().toLowerCase();
+    if (ext !== 'csv' && ext !== 'tsv') {
+      info.className = 'filter-info warn';
+      info.textContent = 'XLSX files are sent as-is (no client filtering)';
+      return;
+    }
+
+    info.className = 'filter-info';
+    info.textContent = 'Reading file...';
+
+    clearTimeout(filterDebounce);
+    filterDebounce = setTimeout(() => {
+      const minHours = parseFloat(document.getElementById('minHours').value) || 0;
+      const maxHours = parseFloat(document.getElementById('maxHours').value) || 999;
+      const maxPrice = parseFloat(document.getElementById('maxPrice').value) || 0;
+
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        const text = e.target.result;
+        const result = filterCSV(text, minHours, maxHours, maxPrice);
+        filteredCsvBlob = result.blob;
+
+        if (result.passed === 0) {
+          info.className = 'filter-info err';
+          info.textContent = `No matching domains found in ${result.total.toLocaleString()} rows. Try widening the auction window.`;
+        } else {
+          const kb = filteredCsvBlob ? (filteredCsvBlob.size / 1024).toFixed(1) : 0;
+          info.className = 'filter-info ok';
+          info.textContent = `✓ ${result.passed} domains matched out of ${result.total.toLocaleString()} rows — sending ${kb} KB instead of ${(file.size/1024/1024).toFixed(1)} MB`;
+        }
+      };
+      reader.onerror = function() {
+        info.className = 'filter-info err';
+        info.textContent = 'Failed to read file';
+      };
+      reader.readAsText(file, 'utf-8');
+    }, 300);
+  }
+
+  // ── Main scan ──────────────────────────────────────────────────────────────
 
   function startScan() {
     const fi = document.getElementById('fileInput');
     if (!fi.files.length) { alert('Select a file first.'); return; }
 
-    const fd = new FormData();
-    fd.append('file',         fi.files[0]);
-    fd.append('min_hours',    document.getElementById('minHours').value);
-    fd.append('max_hours',    document.getElementById('maxHours').value);
-    fd.append('limit',        document.getElementById('limit').value);
-    fd.append('min_sd_score', document.getElementById('minSD').value);
-    fd.append('max_sd_score', document.getElementById('maxSD').value);
-    fd.append('max_price',    document.getElementById('maxPrice').value);
+    const minHours   = parseFloat(document.getElementById('minHours').value) || 0;
+    const maxHours   = parseFloat(document.getElementById('maxHours').value) || 999;
+    const maxPrice   = parseFloat(document.getElementById('maxPrice').value) || 0;
+    const limit      = document.getElementById('limit').value;
+    const minSD      = document.getElementById('minSD').value;
+    const maxSD      = document.getElementById('maxSD').value;
 
     document.getElementById('btnScan').disabled = true;
     document.getElementById('btnStop').classList.remove('hidden');
@@ -432,14 +562,102 @@
     document.getElementById('goodBody').innerHTML   = '';
     lastLogCount = 0;
 
-    fetch('/scan', { method: 'POST', body: fd })
-      .then(r => r.json())
-      .then(d => {
-        if (d.error) { alert(d.error); resetUI(); return; }
-        currentTaskId = d.task_id;
-        pollTimer = setInterval(pollStatus, 1500);
-      })
-      .catch(e => { alert('Error: ' + e); resetUI(); });
+    document.getElementById('stepLabel').textContent = 'Filtering in browser...';
+    document.getElementById('progressText').textContent = '';
+    document.getElementById('progressPct').textContent = '';
+    document.getElementById('progressFill').style.width = '0%';
+
+    const file = fi.files[0];
+    const ext = file.name.split('.').pop().toLowerCase();
+
+    // Для xlsx отправляем как есть (нет клиентской фильтрации)
+    if (ext === 'xlsx' || ext === 'xls') {
+      sendFile(file, file.name, minHours, maxHours, maxPrice, limit, minSD, maxSD);
+      return;
+    }
+
+    // Для CSV — фильтруем в браузере
+    const doFilter = () => {
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        const text = e.target.result;
+        const result = filterCSV(text, minHours, maxHours, maxPrice);
+
+        if (!result.blob || result.passed === 0) {
+          alert(`No matching domains found in ${result.total.toLocaleString()} rows.\nTry widening the auction window or price limit.`);
+          resetUI();
+          return;
+        }
+
+        const kb = (result.blob.size / 1024).toFixed(1);
+        addLog(`Filtered ${result.passed} domains from ${result.total.toLocaleString()} rows (${kb} KB)`, 'success');
+        sendFile(result.blob, 'filtered.csv', minHours, maxHours, maxPrice, limit, minSD, maxSD);
+      };
+      reader.onerror = () => { alert('Failed to read file'); resetUI(); };
+      reader.readAsText(file, 'utf-8');
+    };
+
+    doFilter();
+  }
+
+  function addLog(msg, level) {
+    const c = document.getElementById('logConsole');
+    const now = new Date();
+    const t = now.toTimeString().slice(0,8);
+    c.innerHTML += `<div class="log-line ${level}"><span class="log-time">${t}</span><span class="log-msg">${escHtml(msg)}</span></div>`;
+    c.scrollTop = c.scrollHeight;
+  }
+
+  function sendFile(fileOrBlob, filename, minHours, maxHours, maxPrice, limit, minSD, maxSD) {
+    const fd = new FormData();
+    fd.append('file', fileOrBlob, filename);
+    fd.append('min_hours',    minHours);
+    fd.append('max_hours',    maxHours);
+    fd.append('limit',        limit);
+    fd.append('min_sd_score', minSD);
+    fd.append('max_sd_score', maxSD);
+    fd.append('max_price',    maxPrice);
+
+    document.getElementById('stepLabel').textContent = 'Uploading...';
+
+    const xhr = new XMLHttpRequest();
+
+    xhr.upload.addEventListener('progress', function(e) {
+      if (e.lengthComputable) {
+        const pct = Math.round((e.loaded / e.total) * 100);
+        const kb_done  = (e.loaded  / 1024).toFixed(0);
+        const kb_total = (e.total   / 1024).toFixed(0);
+        document.getElementById('progressFill').style.width = pct + '%';
+        document.getElementById('progressPct').textContent  = pct + '%';
+        document.getElementById('progressText').textContent = kb_done + ' KB / ' + kb_total + ' KB';
+      }
+    });
+
+    xhr.addEventListener('load', function() {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          const d = JSON.parse(xhr.responseText);
+          if (d.error) { alert(d.error); resetUI(); return; }
+          currentTaskId = d.task_id;
+          localStorage.setItem('currentTaskId', d.task_id);
+          document.getElementById('stepLabel').textContent = 'Filtering on server...';
+          document.getElementById('progressFill').style.width = '0%';
+          document.getElementById('progressText').textContent = '0 / 0';
+          document.getElementById('progressPct').textContent  = '0%';
+          pollTimer = setInterval(pollStatus, 1500);
+        } catch(e) { alert('Server error: ' + xhr.responseText); resetUI(); }
+      } else {
+        alert('Upload failed: HTTP ' + xhr.status + '\n' + xhr.responseText);
+        resetUI();
+      }
+    });
+
+    xhr.addEventListener('error', function() {
+      alert('Network error during upload.'); resetUI();
+    });
+
+    xhr.open('POST', '/scan');
+    xhr.send(fd);
   }
 
   function stopScan() {
@@ -460,8 +678,7 @@
         const steps = { filtering: 'Filtering...', scamdoc: 'ScamDoc Scan', virustotal: 'VirusTotal Scan', done: 'Complete' };
         document.getElementById('stepLabel').textContent = steps[data.step] || data.step;
 
-        // Дописываем только новые строки лога
-        if (data.logs.length > lastLogCount) {
+        if (data.logs && data.logs.length > lastLogCount) {
           const c = document.getElementById('logConsole');
           data.logs.slice(lastLogCount).forEach(l => {
             c.innerHTML += `<div class="log-line ${l.level}"><span class="log-time">${l.time}</span><span class="log-msg">${escHtml(l.msg)}</span></div>`;
@@ -470,14 +687,15 @@
           lastLogCount = data.logs.length;
         }
 
-        if (data.results_great.length || data.results_good.length || data.flagged.length)
+        if (data.results_great && (data.results_great.length || data.results_good.length || data.flagged.length))
           renderResults(data.results_great, data.results_good, data.flagged, data.stats);
 
         if (!data.running && data.step === 'done') {
           clearInterval(pollTimer);
           resetUI();
         }
-      });
+      })
+      .catch(() => {});
   }
 
   function buildRows(list) {
@@ -509,7 +727,7 @@
       statBox(great.length, 'Great') +
       statBox(good.length, 'Good') +
       statBox(flagged.length, 'VT Flagged') +
-      statBox(stats.reg_2000_2016 || 0, 'Reg 00-16');
+      statBox((stats && stats.reg_2000_2016) || 0, 'Reg 00-16');
 
     if (great.length) {
       document.getElementById('resultsGreatCard').classList.remove('hidden');
@@ -530,6 +748,7 @@
   function resetUI() {
     document.getElementById('btnScan').disabled = false;
     document.getElementById('btnStop').classList.add('hidden');
+    localStorage.removeItem('currentTaskId');
   }
 
   function downloadXlsx() {
@@ -538,7 +757,7 @@
 
   function escHtml(s) {
     const d = document.createElement('div');
-    d.textContent = s;
+    d.textContent = String(s);
     return d.innerHTML;
   }
 </script>

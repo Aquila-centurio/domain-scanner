@@ -11,6 +11,7 @@ COPY requirements.txt .
 # Устанавливаем зависимости
 # --no-cache-dir — не сохранять кеш pip внутри образа (меньше размер)
 RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir gevent
 
 # Копируем весь код приложения
 COPY . .
@@ -23,4 +24,4 @@ EXPOSE 8000
 # --timeout 120     — таймаут воркера (сканы долгие)
 # --bind 0.0.0.0    — слушаем на всех интерфейсах контейнера
 # app:app           — файл app.py, объект Flask называется app
-CMD ["gunicorn", "--workers", "4", "--timeout", "120", "--bind", "0.0.0.0:8000", "app:app"]
+CMD ["gunicorn", "--worker-class", "gevent", "--workers", "2", "--timeout", "1200", "--bind", "0.0.0.0:8000", "app:app"]
