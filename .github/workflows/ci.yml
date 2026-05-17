@@ -1,0 +1,157 @@
+name: CI
+
+# Триггеры
+on:
+  push:
+    branches: [main]        # CI запускается автоматически при push в main
+  pull_request:
+    branches: [main]        # и при PR в main
+  workflow_dispatch:        # и вручную — кнопка Run workflow в GitHub UI
+    inputs:
+      deploy:
+        description: 'Deploy to server after build?'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+jobs:
+
+  # ── JOB 1: lint + тесты ─────────────────────────────────────
+  # Запускается всегда — при любом триггере
+  test:
+    name: Lint and Test
+    runs-on: ubuntu-latest
+
+    steps:
+      # Клонировать репо в виртуальную машину GitHub
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Установить Python — такую же версию как в Dockerfile
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Кэшировать pip — если requirements.txt не изменился,
+      # пакеты не скачиваются заново. Экономит 1-2 минуты.
+      # Ключ включает хэш файла — кэш сбрасывается при изменении зависимостей
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('app/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      # Установить все зависимости из requirements.txt
+      - name: Install dependencies
+        run: pip install -r app/requirements.txt
+
+      # Проверить стиль кода — flake8 ловит синтаксические ошибки
+      # и очевидные проблемы до запуска
+      # templates/ исключаем — там HTML, не Python
+      # __pycache__ исключаем — это скомпилированные файлы
+      - name: Lint with flake8
+        run: |
+          pip install flake8
+          flake8 app/ \
+            --max-line-length=120 \
+            --exclude=app/__pycache__,app/templates \
+            --ignore=E501,W503
+
+      # Запустить тесты
+      # Redis и внешние API (ScamDoc, VirusTotal) замоканы в тестах —
+      # реальных подключений нет, тесты работают без сервисов
+      - name: Run tests
+        env:
+          REDIS_URL: redis://localhost:6379/0  # фейковый URL — Redis замокан
+          RAPIDAPI_KEY: fake                   # фейковый ключ — API замокан
+          VT_API_KEY: fake                     # фейковый ключ — API замокан
+        run: pytest app/tests/ -v
+
+  # ── JOB 2: сборка и пуш образа ──────────────────────────────
+  # Запускается только если job test прошёл (needs: test)
+  # Смысл: не тратить время на сборку если тесты упали
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Логин в Docker Hub через secrets
+      # DOCKER_USERNAME и DOCKER_TOKEN — хранятся в Settings → Secrets
+      # Никогда не хардкодить credentials в коде
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      # Buildx — расширенный Docker builder
+      # Поддерживает кэширование слоёв между запусками (type=gha)
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Собрать образ и запушить на Docker Hub
+      # context: ./app — Dockerfile лежит в папке app/
+      # Один образ используется и для app и для celery_worker —
+      # они запускаются с разными command в docker-compose.yml
+      # Теги:
+      #   :latest — всегда последняя версия
+      #   :sha    — уникальный тег каждого коммита, можно откатиться
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ./app
+          push: true         # всегда пушим — образ нужен для деплоя по кнопке
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/domain-scanner:latest
+            ${{ secrets.DOCKER_USERNAME }}/domain-scanner:${{ github.sha }}
+          # Кэш слоёв между запусками pipeline
+          # Если requirements.txt не менялся — слой с pip install берётся из кэша
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── JOB 3: деплой на сервер ─────────────────────────────────
+  # Запускается ТОЛЬКО вручную через кнопку Run workflow
+  # И только если в диалоге выбрали deploy: true
+  # Обычный push в main этот job НЕ запускает
+  deploy:
+    name: Deploy to Server
+    runs-on: ubuntu-latest
+    needs: build
+
+    # Условие запуска:
+    # github.event_name == 'workflow_dispatch' — запущено вручную
+    # github.event.inputs.deploy == 'true'    — выбрали deploy: true
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.deploy == 'true'
+
+    steps:
+      # Подключиться по SSH к серверу и выполнить команды
+      # Все credentials берутся из secrets — не из кода
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SERVER_HOST }}      # 31.214.157.183
+          username: ${{ secrets.SERVER_USER }}  # пользователь на сервере
+          key: ${{ secrets.SERVER_SSH_KEY }}    # приватный SSH ключ
+          script: |
+            cd /opt/domain_scanner
+
+            # Скачать новые образы с Docker Hub
+            docker compose pull
+
+            # Перезапустить только app и celery_worker
+            # redis и nginx не трогаем — там нет нашего кода
+            # -d = detached, в фоне
+            docker compose up -d app celery_worker
+
+            # Удалить старые образы чтобы не копились на диске
+            docker image prune -f
