@@ -20,3 +20,6 @@ celery==5.4.0
 celery[redis]==5.4.0
 
 gevent
+
+# Тесты
+pytest==8.3.5
