@@ -123,35 +123,31 @@ jobs:
   # Запускается ТОЛЬКО вручную через кнопку Run workflow
   # И только если в диалоге выбрали deploy: true
   # Обычный push в main этот job НЕ запускает
-  deploy:
+deploy:
     name: Deploy to Server
     runs-on: ubuntu-latest
     needs: build
-
-    # Условие запуска:
-    # github.event_name == 'workflow_dispatch' — запущено вручную
-    # github.event.inputs.deploy == 'true'    — выбрали deploy: true
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.deploy == 'true'
 
     steps:
-      # Подключиться по SSH к серверу и выполнить команды
-      # Все credentials берутся из secrets — не из кода
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1
         with:
-          host: ${{ secrets.SERVER_HOST }}      # 31.214.157.183
-          username: ${{ secrets.SERVER_USER }}  # пользователь на сервере
-          key: ${{ secrets.SERVER_SSH_KEY }}    # приватный SSH ключ
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
-            cd /opt/domain_scanner
+            cd /opt/domain-scanner
 
-            # Скачать новые образы с Docker Hub
+            # Подтянуть актуальный docker-compose.yml с GitHub
+            git pull origin main
+
+            # Скачать новый образ с Docker Hub
             docker compose pull
 
             # Перезапустить только app и celery_worker
-            # redis и nginx не трогаем — там нет нашего кода
-            # -d = detached, в фоне
+            # redis и nginx не трогаем
             docker compose up -d app celery_worker
 
-            # Удалить старые образы чтобы не копились на диске
+            # Удалить старые образы
             docker image prune -f

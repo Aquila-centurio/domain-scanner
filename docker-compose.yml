@@ -16,26 +16,26 @@ services:
 
   # ── Flask + Gunicorn ─────────────────────────────────────────────────────────
   app:
-    build: ./app
+    image: aquilacenturio/domain-scanner:latest  # образ с Docker Hub
     restart: always
-    env_file: .env                         # API ключи из .env
+    env_file: .env
     environment:
       - REDIS_URL=redis://redis:6379/0
     volumes:
-      - uploads_data:/tmp/scanner_uploads  # шарим загрузки с celery_worker
+      - uploads_data:/tmp/scanner_uploads
     depends_on:
       redis:
         condition: service_healthy
 
   # ── Celery Worker ─────────────────────────────────────────────────────────────
   celery_worker:
-    build: ./app
+    image: aquilacenturio/domain-scanner:latest  # тот же образ, другая команда
     restart: always
     env_file: .env
     environment:
       - REDIS_URL=redis://redis:6379/0
     volumes:
-      - uploads_data:/tmp/scanner_uploads  # тот же volume что и у app
+      - uploads_data:/tmp/scanner_uploads
     depends_on:
       redis:
         condition: service_healthy
