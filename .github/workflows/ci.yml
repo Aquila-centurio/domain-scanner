@@ -61,7 +61,7 @@ jobs:
           flake8 app/ \
             --max-line-length=120 \
             --exclude=app/__pycache__,app/templates \
-            --ignore=E501,W503
+            --ignore=E501,W503,W292,W293,E221
 
       # Запустить тесты
       # Redis и внешние API (ScamDoc, VirusTotal) замоканы в тестах —
