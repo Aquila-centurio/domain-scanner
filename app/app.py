@@ -18,6 +18,7 @@ ALLOWED_EXTENSIONS = {'.csv', '.tsv', '.xlsx'}
 # Создаём папку при старте
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+
 # ====================== УТИЛИТЫ ======================
 def allowed_file(filename: str) -> bool:
     """Проверка разрешённых расширений"""
@@ -35,7 +36,6 @@ def index():
 @app.route("/scan", methods=["POST"])
 def start_scan():
     """Принимает файл и параметры, сохраняет файл на диск и ставит задачу в Celery."""
-    
     if 'file' not in request.files:
         return jsonify({"error": "No file part in request"}), 400
 
@@ -46,21 +46,20 @@ def start_scan():
     if not allowed_file(file.filename):
         return jsonify({"error": f"File type not allowed. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"}), 400
 
-    # Безопасное имя файла
     secure_name = secure_filename(file.filename)
     task_id = str(uuid.uuid4())
     file_path = os.path.join(UPLOAD_DIR, f"{task_id}_{secure_name}")
 
     try:
-        # Сохраняем файл на диск (gevent + nginx должны это нормально тянуть)
         file.save(file_path)
-        current_app.logger.info(f"File saved: {file_path} ({os.path.getsize(file_path) / (1024*1024):.1f} MB)")
-    except Exception as e:
-        current_app.logger.error(f"Failed to save file: {e}")
+        current_app.logger.info(
+            f"File saved: {file_path} ({os.path.getsize(file_path) / (1024 * 1024):.1f} MB)"
+        )
+    except Exception as exc:
+        current_app.logger.error(f"Failed to save file: {exc}")
         return jsonify({"error": "Failed to save uploaded file"}), 500
 
     try:
-        # Параметры с дефолтными значениями и валидацией
         min_hours = float(request.form.get("min_hours", 6))
         max_hours = float(request.form.get("max_hours", 24))
         limit = int(request.form.get("limit", 50))
@@ -68,13 +67,11 @@ def start_scan():
         max_sd_score = int(request.form.get("max_sd_score", 100))
         max_price = float(request.form.get("max_price", 0))
 
-        # Базовая валидация
         if min_hours >= max_hours:
             return jsonify({"error": "min_hours must be less than max_hours"}), 400
         if min_sd_score > max_sd_score:
             return jsonify({"error": "min_sd_score must be <= max_sd_score"}), 400
 
-        # Отправляем задачу в Celery
         run_scan.delay(
             task_id=task_id,
             file_path=file_path,
@@ -93,10 +90,10 @@ def start_scan():
             "message": "File received and scan started"
         }), 202
 
-    except ValueError as e:
+    except ValueError:
         return jsonify({"error": "Invalid parameter value"}), 400
-    except Exception as e:
-        current_app.logger.error(f"Error starting scan: {e}")
+    except Exception as exc:
+        current_app.logger.error(f"Error starting scan: {exc}")
         return jsonify({"error": "Internal server error"}), 500
 
 

@@ -17,20 +17,25 @@ celery_app = Celery("scanner", broker=REDIS_URL, backend=REDIS_URL)
 r = redis.from_url(REDIS_URL, decode_responses=True)
 SCAN_TTL = 60 * 60 * 24
 
+
 def state_key(task_id: str) -> str:
     return f"scan:{task_id}"
+
 
 def get_state(task_id: str) -> dict:
     raw = r.get(state_key(task_id))
     return json.loads(raw) if raw else {}
 
+
 def set_state(task_id: str, state: dict):
     r.set(state_key(task_id), json.dumps(state), ex=SCAN_TTL)
+
 
 def update_state(task_id: str, **kwargs):
     state = get_state(task_id)
     state.update(kwargs)
     set_state(task_id, state)
+
 
 def log(task_id: str, msg: str, level: str = "info"):
     state = get_state(task_id)
@@ -50,7 +55,7 @@ def parse_rows_streaming(file_path: str, filename: str):
     if ext in (".csv", ".tsv"):
         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
             reader = csv.reader(f)
-            next(reader, None)  # пропуск заголовка
+            next(reader, None)
             for row in reader:
                 if len(row) >= 15:
                     yield row
@@ -59,7 +64,6 @@ def parse_rows_streaming(file_path: str, filename: str):
                     if len(parts) >= 15:
                         yield parts
     else:
-        # xlsx грузим целиком (openpyxl не поддерживает стриминг иначе)
         with open(file_path, "rb") as fh:
             file_bytes = fh.read()
         wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True)
@@ -70,7 +74,8 @@ def parse_rows_streaming(file_path: str, filename: str):
         wb.close()
 
 
-def load_and_filter(task_id: str, file_path: str, filename: str, min_hours: float, max_hours: float, max_price: float):
+def load_and_filter(task_id: str, file_path: str, filename: str,
+                    min_hours: float, max_hours: float, max_price: float):
     now = datetime.now(timezone.utc)
     window_start = now + timedelta(hours=min_hours)
     window_end = now + timedelta(hours=max_hours)
@@ -147,7 +152,12 @@ def load_and_filter(task_id: str, file_path: str, filename: str, min_hours: floa
     }
     update_state(task_id, stats=stats)
 
-    log(task_id, f"Total rows: {total} | .com: {passed_com} | Reg 2000-2016: {passed_reg} | Auction window: {passed_auction} | Price ok: {passed_price} | Final: {len(domains)}", "success")
+    log(task_id, (
+        f"Total rows: {total} | .com: {passed_com} | "
+        f"Reg 2000-2016: {passed_reg} | Auction window: {passed_auction} | "
+        f"Price ok: {passed_price} | Final: {len(domains)}"
+    ), "success")
+
     domains.sort(key=lambda x: x["hours_left"])
     return domains
 
@@ -181,13 +191,13 @@ def check_scamdoc(task_id: str, domain: str, retries: int = 3):
             else:
                 log(task_id, f"ScamDoc [{domain}]: HTTP {resp.status_code}", "warning")
                 return None
-        except Exception as e:
+        except Exception as exc:
             if attempt < retries - 1:
                 wait = 5 * (attempt + 1)
                 log(task_id, f"ScamDoc timeout for {domain}, retry {attempt + 2}/{retries} in {wait}s...", "warning")
                 time.sleep(wait)
             else:
-                log(task_id, f"ScamDoc failed after {retries} tries: {domain}", "error")
+                log(task_id, f"ScamDoc failed after {retries} tries: {domain} — {exc}", "error")
     return None
 
 
@@ -235,10 +245,8 @@ def run_scan(self, task_id: str, file_path: str, filename: str,
     log(task_id, f"Loading file: {filename}")
 
     try:
-        # Фильтруем стримингом — файл не грузится целиком в память
         domains = load_and_filter(task_id, file_path, filename, min_hours, max_hours, max_price)
     finally:
-        # Удаляем файл после фильтрации
         try:
             os.remove(file_path)
         except Exception:
@@ -255,7 +263,6 @@ def run_scan(self, task_id: str, file_path: str, filename: str,
 
     update_state(task_id, total=len(domains))
 
-    # Step 2: ScamDoc
     update_state(task_id, step="scamdoc")
     log(task_id, f"--- ScamDoc scan ({len(domains)} domains) ---")
 
@@ -287,7 +294,6 @@ def run_scan(self, task_id: str, file_path: str, filename: str,
 
     log(task_id, f"--- {len(passed_sd)} domains passed ScamDoc ---", "success")
 
-    # Step 3: VirusTotal
     update_state(task_id, step="virustotal", progress=0, total=len(passed_sd))
     log(task_id, f"--- VirusTotal scan ({len(passed_sd)} domains) ---")
 
