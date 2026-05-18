@@ -4,6 +4,7 @@ import io
 from datetime import datetime, timezone, timedelta
 from unittest.mock import patch, MagicMock
 import sys
+import tempfile
 
 # Мокаем внешние зависимости ДО импорта tasks
 # Иначе tasks.py попытается подключиться к реальному Redis при импорте
@@ -20,15 +21,6 @@ from tasks import load_and_filter
 
 
 # ── Хелперы ─────────────────────────────────────────────────
-
-def make_csv_bytes(rows: list) -> bytes:
-    """Создать CSV в памяти как bytes — имитирует загруженный файл."""
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerow(["url"] * 25)  # заголовок — 25 колонок как в Namecheap
-    for row in rows:
-        writer.writerow(row)
-    return buf.getvalue().encode("utf-8")
 
 
 def make_row(domain="example.com", hours_from_now=12,
@@ -82,19 +74,33 @@ def make_mocks():
 
 def run_filter(rows, min_hours=6, max_hours=24, max_price=0):
     """
-    Хелпер — запустить load_and_filter с замоканным Redis.
-    patch() временно заменяет функции в модуле tasks на наши фейковые.
-    После выхода из блока with — функции восстанавливаются.
+    Хелпер — создать временный CSV файл на диске и запустить load_and_filter.
+    app/tasks.py читает файл с диска через parse_rows_streaming,
+    поэтому нужен реальный путь, не bytes в памяти.
     """
-    file_bytes = make_csv_bytes(rows)
-    gs, ss, us, lf = make_mocks()
-    with patch("tasks.get_state", gs), \
-         patch("tasks.set_state", ss), \
-         patch("tasks.update_state", us), \
-         patch("tasks.log", lf):
-        return load_and_filter("test", file_bytes, "test.csv",
-                               min_hours, max_hours, max_price)
+    # Создаём временный файл — он будет удалён после выхода из блока with
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".csv", delete=False, encoding="utf-8"
+    ) as f:
+        writer = csv.writer(f)
+        writer.writerow(["url"] * 25)  # заголовок
+        for row in rows:
+            writer.writerow(row)
+        tmp_path = f.name
 
+    gs, ss, us, lf = make_mocks()
+    try:
+        with patch("tasks.get_state", gs), \
+             patch("tasks.set_state", ss), \
+             patch("tasks.update_state", us), \
+             patch("tasks.log", lf):
+            return load_and_filter(
+                "test", tmp_path, "test.csv",
+                min_hours, max_hours, max_price
+            )
+    finally:
+        # Удалить временный файл в любом случае — даже если тест упал
+        os.unlink(tmp_path)
 
 # ── Тесты ───────────────────────────────────────────────────
 
